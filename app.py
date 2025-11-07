@@ -158,7 +158,7 @@ FEW-SHOTS:
 - USER: "How many black products are there?"
   ASSISTANT (SQL): SELECT COUNT(*) AS count FROM production.product WHERE color ILIKE 'black';
 """ 
- 
+    
 TOOLS = [
     {
         "type": "function",
@@ -197,9 +197,8 @@ TOOLS = [
 ]
 
 
-MAX_TURNS = 20  # pencere
+MAX_TURNS = 20
 def _clip_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # basit: son 20 mesaj. (İstersen token temelli kısaltma ekleyebilirsin)
     return msgs[-MAX_TURNS:]
 
 async def chat_with_mcp(app: FastAPI, user_prompt: str,
@@ -214,7 +213,6 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
         {"role": "user", "content": user_prompt},
     ]
 
-    # 1) İlk tur: model isterse tool çağırır
     first = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.2,
@@ -229,7 +227,6 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
         assistant_msg["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
     messages.append(assistant_msg)
 
-    # 2) Tool(lar)ı çalıştır
     used_sql_query = False
     tool_msgs_all: List[Dict[str, Any]] = []
 
@@ -256,7 +253,7 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
                     "content": json.dumps(schema_json, ensure_ascii=False, default=_json_default),
                 }
                 messages.append(tool_msg)
-                tool_msgs_all.append(tool_msg)   # <-- history'ye de eklenecek
+                tool_msgs_all.append(tool_msg)   
 
             elif fname == "sql_query":
                 sql = (args.get("sql") or "")
@@ -274,11 +271,10 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
                     "content": json.dumps(res, ensure_ascii=False, default=_json_default),
                 }
                 messages.append(tool_msg)
-                tool_msgs_all.append(tool_msg)   # <-- history'ye de eklenecek
+                tool_msgs_all.append(tool_msg)   
                 used_sql_query = True
 
             else:
-                # bilinmeyen tool ismi: güvenli no-op
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -288,7 +284,6 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
                 messages.append(tool_msg)
                 tool_msgs_all.append(tool_msg)
 
-    # 3) Final tur (tool kullandıysa sonuçları gördükten sonra)
     final = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.2,
@@ -296,14 +291,11 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
     )
     answer = final.choices[0].message.content or "Boş yanıt."
 
-    # 4) Geçmişi güvenle kaydet
     history.append({"role": "user", "content": user_prompt})
     history.append(assistant_msg)
 
-    # assistant_msg'te tool_calls varsa peşine mutlaka tool mesajları ekliyoruz
     if assistant_msg.get("tool_calls"):
         history.extend(tool_msgs_all)
-        # Emniyet kemeri: Her tool_call için bir tool yanıtı yoksa tool_calls'ı düşür
         if len(tool_msgs_all) < len(assistant_msg["tool_calls"]):
             assistant_msg.pop("tool_calls", None)
 
@@ -313,12 +305,7 @@ async def chat_with_mcp(app: FastAPI, user_prompt: str,
 
     return answer, used_sql_query
 
-
-
-
-# ======================
 # === Suggestions LLM ==
-# ======================
 DB_SCHEMA_TEXT = """\
 Tables and columns (exact):
 person.address: [addressid, addressline1, city, stateprovinceid, postalcode, spatiallocation, rowguid, modifieddate]
@@ -375,9 +362,7 @@ async def generate_suggestions(user_prompt: str, answer_text: str) -> List[str]:
         "Ürün kategorilerini listele"
     ]
 
-# =======================
 # === Bot Framework =====
-# =======================
 from botbuilder.core import (
     BotFrameworkAdapterSettings,
     TurnContext,
@@ -412,27 +397,23 @@ class McpQueryBot:
         conv_id = f"{channel}:{(turn_context.activity.conversation.id or 'default').strip()}"
 
         sessions: SessionStore = self.app.state.sessions
-        session = sessions.get(conv_id)  # get() yeni oturum oluşturuyorsa sorun yok; değilse init et.
+        session = sessions.get(conv_id) 
         if session is None:
-            session = sessions.create(conv_id)  # veya uygun “ensure” metodu
+            session = sessions.create(conv_id)  
         if "scratch" not in session.__dict__:
             session.scratch = {}
         if "messages" not in session.__dict__:
             session.messages = []
 
-        # --- Kullanıcı adını güvenle yakala ve boşsa güncelle ---
         raw_name = (getattr(turn_context.activity.from_property, "name", None) or "").strip()
         raw_id   = (getattr(turn_context.activity.from_property, "id", None) or "").strip()
         captured = raw_name or raw_id or "Misafir"
 
-        # Eğer hiç kaydedilmemişse ya da eski değer "Misafir"/boş ise güncelle
         if not session.scratch.get("user_name") or session.scratch.get("user_name") in {"", "Misafir"}:
             session.scratch["user_name"] = captured
 
-        # (isteğe bağlı) logla
         print("BF From:", {"name": raw_name, "id": raw_id, "kept": session.scratch["user_name"]})
 
-        # reset
         if user_text.lower() in {"reset", "/reset"}:
             keep_name = session.scratch.get("user_name")
             session.messages.clear()
@@ -442,14 +423,6 @@ class McpQueryBot:
             await turn_context.send_activity("Oturum temizlendi.")
             return
 
-        # --- KİLİT NOKTA: Bu soruyu LLM’e sormadan kendin yanıtla ---
-        # low = user_text.lower()
-        # if low in {"kiminle konuşuyorsun", "ben kimim", "who am i", "who are you talking to"}:
-        #     uname = session.scratch.get("user_name", "Misafir")
-        #     await turn_context.send_activity(MessageFactory.text(f"Şu an {uname} ile konuşuyorum."))
-        #     return
-
-        # Normal akış (LLM)
         try:
             answer, used_tool = await chat_with_mcp(
                 self.app,
@@ -467,9 +440,7 @@ class McpQueryBot:
         else:
             await turn_context.send_activity(MessageFactory.text(answer))
 
-# =======================
 # === FastAPI app =======
-# =======================
 app = FastAPI(
     title="Unified Bot + MCP API",
     description="FastAPI ile tek uygulama: Bot Framework endpoint + MCP-benzeri SQL endpoint + Health.",
@@ -488,20 +459,16 @@ async def shutdown():
     await app.state.pg_pool.close()
     print("[shutdown] PG pool closed")
 
-# ---- Models for OpenAPI niceness (optional) ----
 class SqlBody(BaseModel):
     sql: str
     top: Optional[int] = None
 
-# Health
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# MCP-like SQL endpoint
 @app.post("/mcp/sql_query")
 async def mcp_sql_query(body: SqlBody, request: Request):
-    # (opsiyonel) basit bearer kontrolü
     mcp_auth = os.getenv("MCP_AUTH")
     if mcp_auth:
         auth = request.headers.get("Authorization", "")
@@ -520,13 +487,11 @@ async def mcp_db_schema(include_views: bool = False, schemas: Optional[str] = No
     res = await get_schema_tree_slim(app.state.pg_pool, include_views=include_views, schema_whitelist=wl)
     return res
 
-# Bot endpoint (Emulator/Teams)
 @app.post("/api/messages")
 async def messages(request: Request):
     auth_header = request.headers.get("Authorization", "")
     body = await request.json()
 
-    # 🔧 DÜZELTME: dict -> Activity / ???
     activity = Activity().deserialize(body)
 
     bot: McpQueryBot = app.state.bot
@@ -537,8 +502,6 @@ async def messages(request: Request):
         else:
             await turn_context.send_activity(f"Activity type: {turn_context.activity.type}")
 
-    # 🔧 DÜZELTME: body yerine activity veriyoruz
     await adapter.process_activity(activity, auth_header, aux_func)
 
-    # 200 OK döndür (Emulator bundan hoşlanır)
     return Response(status_code=200)
