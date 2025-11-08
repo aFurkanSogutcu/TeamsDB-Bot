@@ -1,4 +1,3 @@
-# app_fastapi.py
 import os
 import json
 import re
@@ -29,7 +28,7 @@ class SessionState:
         self.scratch: Dict[str, Any] = {}          # yapılandırılmış bellek (ör. last_product)
         self.updated_at = time.time()
 
-# Basit LRU (production'da Redis/Cosmos/DB önerilir)
+# Basit LRU (production'da Redis/Cosmos/DB)
 class SessionStore:
     def __init__(self, max_sessions=500):
         self.data: OrderedDict[str, SessionState] = OrderedDict()
@@ -51,11 +50,11 @@ load_dotenv()
 
 # === Postgres / Common ===
 PG_DSN = {
-    "user": os.getenv("PGUSER", "postgres"),
-    "password": os.getenv("PGPASSWORD", "2706"),
-    "database": os.getenv("PGDATABASE", "Adventureworks"),
-    "host": os.getenv("PGHOST", "localhost"),
-    "port": int(os.getenv("PGPORT", "5432")),
+    "user": os.getenv("PGUSER", ""),
+    "password": os.getenv("PGPASSWORD", ""),
+    "database": os.getenv("PGDATABASE", ""),
+    "host": os.getenv("PGHOST", ""),
+    "port": int(os.getenv("PGPORT", "")),
 }
 MAX_ROWS = int(os.getenv("MAX_ROWS", "100"))
 
@@ -114,7 +113,6 @@ async def get_schema_tree_slim(pool: asyncpg.Pool,
         if schema_whitelist and s not in schema_whitelist:
             continue
         out.setdefault(s, []).append(r["table_name"])
-    # Şema hiç tablosu yoksa ve whitelist ile istenmişse yine göstermek istersen:
     if schema_whitelist:
         for s in schema_whitelist:
             out.setdefault(s, out.get(s, []))
@@ -447,12 +445,25 @@ app = FastAPI(
     version="1.0.0"
 )
 
+import ssl
+
 @app.on_event("startup")
 async def startup():
-    app.state.pg_pool = await asyncpg.create_pool(min_size=1, max_size=5, **PG_DSN)
+    ssl_ctx = ssl.create_default_context()
+    app.state.pg_pool = await asyncpg.create_pool(
+        min_size=1,
+        max_size=5,
+        ssl=ssl_ctx,              
+        **PG_DSN
+    )
     app.state.sessions = SessionStore(max_sessions=500)
     app.state.bot = McpQueryBot(app)
     print("[startup] PG pool created")
+
+    async with app.state.pg_pool.acquire() as conn:
+        n = await conn.fetchval("SELECT COUNT(*) FROM production.product;")
+        print("product count:", n)
+
 
 @app.on_event("shutdown")
 async def shutdown():
