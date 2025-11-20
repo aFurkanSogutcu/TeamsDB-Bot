@@ -582,7 +582,7 @@ async def messages(request: web.Request) -> web.Response:
 
     return web.Response(status=200)
 
-# lifecycle hook'ları EKLE
+# lifecycle hook'ları EKLEe
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
