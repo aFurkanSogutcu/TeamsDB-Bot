@@ -545,7 +545,7 @@ async def mcp_db_schema(request: web.Request) -> web.Response:
     wl = [s.strip() for s in schemas.split(",")] if schemas else None
 
     res = await get_schema_tree_slim(
-        app.state.pg_pool,
+        app["pg_pool"],
         include_views=include_views,
         schema_whitelist=wl,
     )
@@ -590,4 +590,6 @@ app.router.add_get("/health", health)
 app.router.add_post("/api/messages", messages)
  
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=3978)
+    port = int(os.environ.get("PORT", "3978"))
+    print(f"[startup] Listening on 0.0.0.0:{port}")
+    web.run_app(app, host="0.0.0.0", port=port)
