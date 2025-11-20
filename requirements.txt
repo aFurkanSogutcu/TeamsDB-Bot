@@ -4,7 +4,8 @@ gunicorn
 asyncpg
 python-dotenv
 openai
-botbuilder-core
+botbuilder-core==4.17.0
+botbuilder-integration-aiohttp==4.17.0
 pydantic
 aiohttp==3.9.5
 msrest==0.7.1
