@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+gunicorn
+asyncpg
+python-dotenv
+openai
+botbuilder-core
+pydantic
+aiohttp==3.9.5
+msrest==0.7.1
+ssl
