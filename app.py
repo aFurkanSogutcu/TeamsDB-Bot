@@ -248,16 +248,19 @@ TOOLS = [
     }
 ]
 
-
 MAX_TURNS = 20
+MAX_TOOL_HOPS = 5  # Aynı istek içinde en fazla kaç kere tool zinciri kurulsun
+
 def _clip_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return msgs[-MAX_TURNS:]
 
-async def chat_with_mcp(app, user_prompt: str,
+async def chat_with_mcp(app, 
+                        user_prompt: str,
                         history: List[Dict[str, Any]],
                         scratch: Dict[str, Any]) -> tuple[str, bool]:
     user_name = scratch.get("user_name") or "Misafir"
 
+    # Geçmiş + user mesajı ile başlıyoruz
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current user name: {user_name}"},
@@ -265,25 +268,39 @@ async def chat_with_mcp(app, user_prompt: str,
         {"role": "user", "content": user_prompt},
     ]
 
-    first = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        tools=TOOLS,
-        tool_choice="auto",
-        messages=messages,
-    )
-    msg = first.choices[0].message
-
-    assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-    if msg.tool_calls:
-        print("msg.tool_calls:", msg.tool_calls)
-        assistant_msg["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
-    messages.append(assistant_msg)
-
+    answer: str = "Boş yanıt."
     used_sql_query = False
-    tool_msgs_all: List[Dict[str, Any]] = []
 
-    if msg.tool_calls:
+    # LLM + tool sonuçları arasında ileri geri gidilen döngü
+    for hop in range(MAX_TOOL_HOPS):
+        # 1) Her adımda tools açık
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.2,
+            tools=TOOLS,
+            tool_choice="auto",
+            messages=messages,
+        )
+        msg = resp.choices[0].message
+
+        # Tool çağrısı yoksa: bu final cevap
+        if not msg.tool_calls:
+            answer = msg.content or "Boş yanıt."
+            messages.append({"role": "assistant", "content": answer})
+            break
+
+        # Tool çağrıları varsa: bu assistant mesajını tool_calls ile birlikte kaydet
+        assistant_msg: Dict[str, Any] = {
+            "role": "assistant", 
+            "content": msg.content or "",
+            "tool_calls": [tc.model_dump() for tc in msg.tool_calls]
+        }
+        
+        print("msg.tool_calls:", msg.tool_calls)
+        messages.append(assistant_msg)
+
+        # tool_msgs_all: List[Dict[str, Any]] = []
+        # 2) Tüm tool çağrılarını sırayla çalıştır
         for tc in (msg.tool_calls or []):
             fname = getattr(tc.function, "name", "")
             try:
@@ -293,14 +310,22 @@ async def chat_with_mcp(app, user_prompt: str,
 
             if fname == "db_schema":
                 include_views = bool(args.get("include_views", False))
-                schemas = args.get("schemas") or None
+                
+                # ÖNEMLİ: LLM'in gönderdiği "schemas" parametresini YOK SAY.
+                # Her zaman TÜM şemayı dön, böylece humanresources.* dahil her şeyi görebilecek.
+                #schemas = args.get("schemas") or None
                 schema_json = await get_schema_tree_slim(
                     app["pg_pool"],
                     include_views=include_views,
-                    schema_whitelist=schemas
+                    schema_whitelist=None
                 )
                 #print("DB SCHEMA JSON:", json.dumps(schema_json, indent=2, ensure_ascii=False))
 
+                try:
+                    scratch["schema_text"] = _schema_to_text(schema_json)
+                except Exception:
+                    scratch["schema_text"] = json.dumps(schema_json, ensure_ascii=False, default=_json_default)
+ 
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -308,7 +333,7 @@ async def chat_with_mcp(app, user_prompt: str,
                     "content": json.dumps(schema_json, ensure_ascii=False, default=_json_default),
                 }
                 messages.append(tool_msg)
-                tool_msgs_all.append(tool_msg)   
+                # tool_msgs_all.append(tool_msg)   
 
             elif fname == "sql_query":
                 sql = (args.get("sql") or "")
@@ -326,7 +351,7 @@ async def chat_with_mcp(app, user_prompt: str,
                     "content": json.dumps(res, ensure_ascii=False, default=_json_default),
                 }
                 messages.append(tool_msg)
-                tool_msgs_all.append(tool_msg)   
+                # tool_msgs_all.append(tool_msg)   
                 used_sql_query = True
 
             else:
@@ -337,24 +362,31 @@ async def chat_with_mcp(app, user_prompt: str,
                     "content": json.dumps({"error": f"Unknown tool: {fname}"}, ensure_ascii=False),
                 }
                 messages.append(tool_msg)
-                tool_msgs_all.append(tool_msg)
+                # tool_msgs_all.append(tool_msg)
             
             print("kullanılan func: ", fname)
+            # Bu noktada:
+            # - db_schema ve/veya sql_query sonuçları messages'e eklendi
+            # - Döngü başa dönecek, LLM bu sonuçları görerek tekrar karar verecek
+            #   (yeni tool çağırabilir veya final cevabı üretebilir)
+    else:
+        # hop limiti aşılırsa
+        answer = "İstek çok fazla araç adımı gerektirdi, lütfen soruyu biraz daha basitleştir."
 
-    final = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        messages=messages,
-    )
-    answer = final.choices[0].message.content or "Boş yanıt."
+        # final = client.chat.completions.create(
+        #     model="gpt-4o-mini",
+        #     temperature=0.2,
+        #     messages=messages,
+        # )
+        # answer = final.choices[0].message.content or "Boş yanıt."
 
     history.append({"role": "user", "content": user_prompt})
-    history.append(assistant_msg)
+    # history.append(assistant_msg)
 
-    if assistant_msg.get("tool_calls"):
-        history.extend(tool_msgs_all)
-        if len(tool_msgs_all) < len(assistant_msg["tool_calls"]):
-            assistant_msg.pop("tool_calls", None)
+    # if assistant_msg.get("tool_calls"):
+    #     history.extend(tool_msgs_all)
+    #     if len(tool_msgs_all) < len(assistant_msg["tool_calls"]):
+    #         assistant_msg.pop("tool_calls", None)
 
     history.append({"role": "assistant", "content": answer})
     if len(history) > MAX_TURNS:
@@ -362,30 +394,42 @@ async def chat_with_mcp(app, user_prompt: str,
 
     return answer, used_sql_query
 
-# === Suggestions LLM ==
-DB_SCHEMA_TEXT = """\
-Tables and columns (exact):
-person.address: [addressid, addressline1, city, stateprovinceid, postalcode, spatiallocation, rowguid, modifieddate]
-person.phonenumbertype: [phonenumbertypeid, name, modifieddate]
-production.product: [productid, name, productnumber, makeflag, finishedgoodsflag, color, safetystocklevel, reorderpoint, standardcost, listprice, size, sizeunitmeasurecode, weightunitmeasurecode, weight, daystomanufacture, productline, class, style, productsubcategoryid, productmodelid, sellstartdate, sellenddate, discontinueddate, rowguid, modifieddate]
-production.productcategory: [productcategoryid, name, rowguid, modifieddate]
-sales.salesorderdetail: [salesorderid, salesorderdetailid, carriertrackingnumber, orderqty, productid, specialofferid, unitprice, unitpricediscount, rowguid, modifieddate]
-"""
+def _schema_to_text(schema_json: Dict[str, Any]) -> str:
+    """
+    {"schemas": {"humanresources": {"department": [{"name": "departmentid", "type": "integer"}, ...]}}}
+    gibi bir yapıyı, suggestions LLM'e uygun kısa bir metne çevir.
+    """
+    parts = []
+    schemas = schema_json.get("schemas", {})
+    for schema_name, tables in schemas.items():
+        for table_name, cols in tables.items():
+            col_names = [c.get("name", "?") for c in cols]
+            parts.append(f"{schema_name}.{table_name}: [{', '.join(col_names)}]")
+    return "\n".join(parts) if parts else "No tables."
 
-SUGGESTIONS_SYS = f"""\
-You generate short follow-up button suggestions for a Turkish SQL helper chat over AdventureWorks.
 
-HARD RULES:
-- Stick to ONLY these tables/columns and concepts (do not invent new ones):
-{DB_SCHEMA_TEXT}
-- Output ONLY JSON: {{"suggestions":[ "...", "..." ]}}
-- 3 items, Turkish, ≤ 40 chars each.
-- Each item must be a realistic follow-up the user could click (do not output SQL, only natural-language prompts).
-- Prefer concrete intents that map to the schema (renk/color, kategori/category, fiyat/price, satış/sales).
-- If context is vague, produce generic but schema-relevant queries (örn: "Renk bazlı ürün sayıları", "En çok satan 10 ürün").
-"""
+async def generate_suggestions(user_prompt: str, 
+                               answer_text: str,
+                               schema_text: Optional[str] = None,
+                               ) -> List[str]:
+    if not schema_text:
+        schema_text = "No explicit schema given. Keep suggestions generic but still about SQL over this database."
 
-async def generate_suggestions(user_prompt: str, answer_text: str) -> List[str]:
+    SUGGESTIONS_SYS = f"""\
+    You generate short follow-up button suggestions for a Turkish SQL helper chat over AdventureWorks.
+
+    HARD RULES:
+    - You MUST base your suggestions ONLY on the schemas/tables/columns listed below.
+    - Do not invent tables or columns that are not present here.
+    - Output ONLY JSON: {{"suggestions":[ "...", "..." ]}}
+    - 3 items, Turkish, ≤ 40 chars each.
+    - Each item must be a realistic follow-up the user could click (do not output SQL, only natural-language prompts).
+    - If context is vague, produce generic but schema-relevant queries (örn: "Renk bazlı ürün sayıları", "En çok satan 10 ürün").
+
+    CURRENT DB SCHEMA (schema.table: [columns]):
+    {schema_text}
+    """
+
     try:
         comp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -497,7 +541,9 @@ class McpQueryBot:
             return
 
         if used_tool:
-            suggestions = await generate_suggestions(user_text, answer)
+            # schema_text varsa (db_schema en az bir kez çalıştıysa) onu kullan
+            schema_text = session.scratch.get("schema_text")
+            suggestions = await generate_suggestions(user_text, answer, schema_text)
             await send_buttons_in_bubble(turn_context, answer, suggestions)
         else:
             await turn_context.send_activity(MessageFactory.text(answer))
@@ -550,19 +596,6 @@ async def mcp_db_schema(request: web.Request) -> web.Response:
         schema_whitelist=wl,
     )
     return web.json_response(res)
-
-class MyBot:
-    async def on_turn(self, context: TurnContext):
-        try:
-            if context.activity.type == "message":
-                await context.send_activity("pong")
-            else:
-                await context.send_activity(f"Activity type: {context.activity.type}")
-        except ErrorResponseException as e:
-            print("Reply failed:", e)          # status code
-            if hasattr(e, "response") and e.response is not None:
-                print("Raw response:", e.response.text)
-            raise
 
 async def messages(request: web.Request) -> web.Response:
     auth_header = request.headers.get("Authorization", "")
